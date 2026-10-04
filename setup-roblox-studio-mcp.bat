@@ -1,9 +1,10 @@
 <# :
 @echo off
 rem ---------------------------------------------------------------------------
-rem  One-click setup: connects Claude (Claude Code + Claude Desktop) to
-rem  Roblox Studio's built-in MCP server. Double-click this file to run it.
-rem  The batch part just launches the PowerShell below this header.
+rem  One-click setup: connects Claude to Roblox Studio's built-in MCP server and
+rem  puts a "Roblox Claude" icon on your desktop. Double-click this file once.
+rem  After that, just double-click the desktop icon.
+rem  The batch part only launches the PowerShell below this header.
 rem ---------------------------------------------------------------------------
 setlocal
 set "SETUP_SCRIPT=%~f0"
@@ -21,12 +22,14 @@ $McpBat     = Join-Path $env:LOCALAPPDATA 'Roblox\mcp.bat'
 # cmd.exe expands it each time the server starts.
 $LaunchCmd  = 'cmd.exe'
 $LaunchArgs = @('/c', 'cd /d %LOCALAPPDATA%\Roblox && .\mcp.bat')
+$AppDir     = Join-Path $env:LOCALAPPDATA 'RobloxClaude'
+$WorkDir    = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Roblox Claude'
 
 function Step($msg) { Write-Host ''; Write-Host "==> $msg" -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host "    $msg" -ForegroundColor Green }
 function Warn($msg) { Write-Host "    $msg" -ForegroundColor Yellow }
 
-Write-Host 'Roblox Studio -> Claude MCP setup' -ForegroundColor White
+Write-Host 'Roblox Studio -> Claude setup' -ForegroundColor White
 
 # 1. Roblox Studio's MCP server ------------------------------------------------
 Step 'Checking for Roblox Studio MCP server'
@@ -101,14 +104,73 @@ foreach ($path in $configPaths) {
 }
 if (-not $desktopDone) { Warn 'Claude Desktop not found. Skipped (Claude Code is enough).' }
 
-# 4. Verify ----------------------------------------------------------------------
+# 4. "Roblox Claude" desktop icon -----------------------------------------------
+Step 'Creating the "Roblox Claude" desktop icon'
+New-Item -ItemType Directory -Force -Path $AppDir, (Join-Path $WorkDir '.claude') | Out-Null
+
+# Let Claude use the Studio tools in this folder without asking every time.
+$settingsPath = Join-Path $WorkDir '.claude\settings.json'
+if (-not (Test-Path $settingsPath)) {
+    [IO.File]::WriteAllText($settingsPath,
+        "{`n  `"permissions`": {`n    `"allow`": [`"mcp__$ServerName`"]`n  }`n}`n",
+        (New-Object Text.UTF8Encoding $false))
+}
+
+# The launcher: opens Studio if needed, then starts Claude already pointed at it.
+$launcher = @'
+$host.UI.RawUI.WindowTitle = 'Roblox Claude'
+$WorkDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Roblox Claude'
+
+if (-not (Get-Process RobloxStudioBeta -ErrorAction SilentlyContinue)) {
+    Write-Host 'Starting Roblox Studio...' -ForegroundColor Cyan
+    $exe = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Roblox\Versions') -Recurse -Filter RobloxStudioBeta.exe -ErrorAction SilentlyContinue |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    try {
+        if ($exe) { Start-Process $exe.FullName } else { Start-Process 'roblox-studio:' }
+        Start-Sleep -Seconds 15
+    } catch {
+        Write-Host 'Could not start Roblox Studio. Open it yourself, then press Enter.' -ForegroundColor Yellow
+        Read-Host | Out-Null
+    }
+}
+
+$claude = (Get-Command claude -ErrorAction SilentlyContinue).Source
+if (-not $claude) { $claude = Join-Path $env:USERPROFILE '.local\bin\claude.exe' }
+
+Set-Location $WorkDir
+& $claude 'You are connected to my open Roblox Studio through the roblox-studio MCP tools. Check the connection by telling me what is in Workspace, then ask me what I want to build.'
+'@
+$launcherPath = Join-Path $AppDir 'start.ps1'
+[IO.File]::WriteAllText($launcherPath, $launcher, (New-Object Text.UTF8Encoding $true))
+
+$shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Roblox Claude.lnk'
+try {
+    $shell = New-Object -ComObject WScript.Shell
+    $lnk = $shell.CreateShortcut($shortcutPath)
+    $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
+    $lnk.WorkingDirectory = $WorkDir
+    $studioExe = Get-ChildItem (Join-Path $env:LOCALAPPDATA 'Roblox\Versions') -Recurse -Filter RobloxStudioBeta.exe -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+    if ($studioExe) { $lnk.IconLocation = "$($studioExe.FullName),0" }
+    $lnk.Save()
+    Ok "Created $shortcutPath"
+} catch {
+    Warn "Could not create the desktop icon: $($_.Exception.Message)"
+}
+
+# 5. Verify + launch -------------------------------------------------------------
 if ($claude) {
-    Step 'Checking the connection (Roblox Studio must be open)'
+    Step 'Checking the connection'
     & $claude mcp list
 }
 
 Write-Host ''
-Write-Host 'Done.' -ForegroundColor Green
-Write-Host "  - If '$ServerName' shows as connected above, you're all set."
-Write-Host '  - If it failed: open Roblox Studio (with "Studio as MCP server" on) and run this again.'
-Write-Host '  - Claude Desktop: fully quit it (system tray > Quit) and reopen to load the server.'
+Write-Host 'All set!' -ForegroundColor Green
+Write-Host '  From now on: double-click "Roblox Claude" on your desktop.'
+Write-Host '  It opens Roblox Studio (if needed) and starts Claude connected to it.'
+if (Test-Path $shortcutPath) {
+    Write-Host ''
+    Write-Host 'Opening Roblox Claude now...' -ForegroundColor Cyan
+    Start-Process $shortcutPath
+}
